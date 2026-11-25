@@ -10,6 +10,7 @@ const KEYS = {
   cachedVerse: 'meditation_cpc_cached_verse',
   fcmToken: 'meditation_cpc_fcm_token',
   subscriptionId: 'meditation_cpc_subscription_id',
+  lastNotifiedDate: 'meditation_cpc_last_notified_date',
   favorites: 'meditation_cpc_favorites',
 } as const;
 
@@ -140,3 +141,20 @@ export function saveFavoriteVerses(favorites: FavoriteVerse[]): void {
     // Ignore quota errors
   }
 }
+
+export function loadLastNotifiedDate(): string | null {
+  try {
+    return localStorage.getItem(KEYS.lastNotifiedDate);
+  } catch {
+    return null;
+  }
+}
+
+export function saveLastNotifiedDate(dateKey: string): void {
+  try {
+    localStorage.setItem(KEYS.lastNotifiedDate, dateKey);
+  } catch {
+    // Ignore storage errors
+  }
+}
+

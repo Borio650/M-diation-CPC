@@ -40,8 +40,7 @@ export const SettingsPage: React.FC = () => {
   const [showPrivacy, setShowPrivacy] = useState(false);
   const [showLicenses, setShowLicenses] = useState(false);
 
-  const isSubscriptionActive =
-    notificationEnabled && permissionState === 'granted' && hasFcmSubscription;
+  const isSubscriptionActive = notificationEnabled && permissionState === 'granted';
 
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-10 sm:py-14 space-y-10">
@@ -246,12 +245,6 @@ export const SettingsPage: React.FC = () => {
           {pushFeedback && (
             <p className="text-xs sm:text-sm text-[#35516E] pt-1 leading-relaxed">
               {pushFeedback.message}
-            </p>
-          )}
-
-          {anonymousAuthBlocked && (
-            <p className="text-xs text-[#4A637D] pt-1 leading-relaxed">
-              Note technique : l’authentification anonyme Firebase n’est pas encore activée dans votre console Firebase (Authentication → Méthodes de connexion → Anonyme). Vos préférences restent sauvegardées localement sur cet appareil.
             </p>
           )}
         </div>

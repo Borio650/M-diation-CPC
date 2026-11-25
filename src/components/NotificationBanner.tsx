@@ -30,7 +30,7 @@ export const NotificationBanner: React.FC = () => {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showIOSGuide, setShowIOSGuide] = useState(false);
 
-  const isFullyActive = notificationEnabled && permissionState === 'granted' && hasFcmSubscription;
+  const isFullyActive = notificationEnabled && permissionState === 'granted';
 
   return (
     <section

@@ -7,6 +7,7 @@ import {
   getBrowserNotificationPermission,
   getMobileNotificationInfo,
   sendDeviceTestNotification,
+  showDailyVerseNotification,
   subscribeToForegroundMessages,
   syncPushSubscriptionPreferences,
   type MobileNotificationInfo,
@@ -21,10 +22,16 @@ import {
 } from '@/src/lib/settingsService';
 import {
   loadFavoriteVerses,
+  loadLastNotifiedDate,
   loadStoredPushMetadata,
   saveFavoriteVerses,
+  saveLastNotifiedDate,
 } from '@/src/lib/storage';
-import { getDateKeyForTimezone, getMillisecondsUntilMidnight } from '@/src/lib/timezone';
+import {
+  getDateKeyForTimezone,
+  getMillisecondsUntilMidnight,
+  getMillisecondsUntilTime,
+} from '@/src/lib/timezone';
 import { fetchDailyVerse } from '@/src/lib/verseService';
 import { useOnlineStatus } from '@/src/hooks/useOnlineStatus';
 import { AppRoute, BibleVersionId, DailyVerse, FavoriteVerse } from '@/src/types/bible';
@@ -224,6 +231,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [showToast]);
 
+  // Keep browser notification permission synced with browser/OS settings
+  useEffect(() => {
+    const syncPermission = () => {
+      setPermissionState(getBrowserNotificationPermission());
+    };
+    window.addEventListener('focus', syncPermission);
+    document.addEventListener('visibilitychange', syncPermission);
+    return () => {
+      window.removeEventListener('focus', syncPermission);
+      document.removeEventListener('visibilitychange', syncPermission);
+    };
+  }, []);
+
   // Automatic midnight refresh in the selected timezone
   useEffect(() => {
     const computedToday = getDateKeyForTimezone(timezone);
@@ -243,6 +263,54 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     return () => window.clearTimeout(timer);
   }, [timezone, selectedDateKey]);
+
+  // Planification locale quotidienne via Service Worker à l'heure et au fuseau choisis
+  useEffect(() => {
+    if (!notificationEnabled || permissionState !== 'granted') return;
+
+    let timer: number | undefined;
+    const checkAndNotify = () => {
+      const activeDate = getDateKeyForTimezone(timezone);
+      if (loadLastNotifiedDate() === activeDate) return;
+
+      const msUntilTarget = getMillisecondsUntilTime(timezone, notificationTime);
+      if (msUntilTarget === null) {
+        saveLastNotifiedDate(activeDate);
+        const verseForToday = verse && verse.date === activeDate ? verse : null;
+        void showDailyVerseNotification({
+          dateKey: activeDate,
+          reference: verseForToday?.reference,
+          verseText: verseForToday?.translations[preferredVersion],
+        });
+      } else {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => {
+          const currentActiveDate = getDateKeyForTimezone(timezone);
+          if (loadLastNotifiedDate() === currentActiveDate) return;
+          saveLastNotifiedDate(currentActiveDate);
+          const verseForToday = verse && verse.date === currentActiveDate ? verse : null;
+          void showDailyVerseNotification({
+            dateKey: currentActiveDate,
+            reference: verseForToday?.reference,
+            verseText: verseForToday?.translations[preferredVersion],
+          });
+        }, msUntilTarget);
+      }
+    };
+
+    checkAndNotify();
+    const handleResume = () => {
+      if (document.visibilityState === 'visible') {
+        checkAndNotify();
+      }
+    };
+    document.addEventListener('visibilitychange', handleResume);
+
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', handleResume);
+    };
+  }, [notificationEnabled, permissionState, timezone, notificationTime, verse, preferredVersion]);
 
   const reloadVerse = useCallback(
     async (dateToLoad?: string) => {
@@ -344,8 +412,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setPushFeedback(result);
 
       if (result.success) {
+        if (getMillisecondsUntilTime(timezone, notificationTime) === null) {
+          saveLastNotifiedDate(getDateKeyForTimezone(timezone));
+        }
         setNotificationEnabled(true);
-        setHasFcmSubscription(true);
+        setHasFcmSubscription(Boolean(result.token));
         await persistUserSettings(
           {
             preferredVersion,
@@ -357,9 +428,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         );
         showToast(result.message, 'success');
       } else {
-        if (result.reason === 'auth-required') {
-          setAnonymousAuthBlocked(true);
-        }
         showToast(result.message, result.reason === 'permission-denied' ? 'warning' : 'info');
       }
       return result;

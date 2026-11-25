@@ -103,3 +103,61 @@ export function addDaysToDateKey(dateKey: string, deltaDays: number): string {
   const dd = String(next.getUTCDate()).padStart(2, '0');
   return `${yy}-${mm}-${dd}`;
 }
+
+export function getTimeInTimezone(
+  timeZone: string = DEFAULT_TIMEZONE,
+  now: Date = new Date()
+): { hours: number; minutes: number; seconds: number; totalMinutes: number } {
+  const tz = timeZone || DEFAULT_TIMEZONE;
+  const formatParts = (zone: string) =>
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: zone,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).formatToParts(now);
+
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = formatParts(tz);
+  } catch {
+    parts = formatParts(DEFAULT_TIMEZONE);
+  }
+
+  const map: Record<string, string> = {};
+  for (const part of parts) {
+    map[part.type] = part.value;
+  }
+  const hours = parseInt(map.hour === '24' ? '0' : map.hour, 10) || 0;
+  const minutes = parseInt(map.minute, 10) || 0;
+  const seconds = parseInt(map.second, 10) || 0;
+
+  return {
+    hours,
+    minutes,
+    seconds,
+    totalMinutes: hours * 60 + minutes,
+  };
+}
+
+export function getMillisecondsUntilTime(
+  timeZone: string = DEFAULT_TIMEZONE,
+  targetTime: string = '07:00',
+  now: Date = new Date()
+): number | null {
+  const [hStr, mStr] = targetTime.split(':');
+  const targetH = parseInt(hStr, 10);
+  const targetM = parseInt(mStr, 10);
+  if (Number.isNaN(targetH) || Number.isNaN(targetM)) return null;
+
+  const { hours, minutes, seconds } = getTimeInTimezone(timeZone, now);
+  const currentSeconds = hours * 3600 + minutes * 60 + seconds;
+  const targetSeconds = targetH * 3600 + targetM * 60;
+
+  if (currentSeconds >= targetSeconds) {
+    return null;
+  }
+  return Math.max(1000, (targetSeconds - currentSeconds) * 1000);
+}
+

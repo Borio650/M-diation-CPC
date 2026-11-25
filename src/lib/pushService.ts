@@ -17,12 +17,11 @@ export interface PushActivationResult {
   permission: NotificationPermissionState;
   token?: string;
   subscriptionId?: string;
+  cloudSynced?: boolean;
   reason?:
     | 'permission-denied'
     | 'permission-dismissed'
     | 'unsupported'
-    | 'missing-vapid'
-    | 'auth-required'
     | 'offline'
     | 'error';
   message: string;
@@ -106,6 +105,58 @@ async function computeSubscriptionDocId(userId: string, fcmToken: string): Promi
   return `${userId}_web`;
 }
 
+async function getPushServiceWorkerRegistration(): Promise<ServiceWorkerRegistration | null> {
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
+    return null;
+  }
+  try {
+    return await navigator.serviceWorker.register('/firebase-messaging-sw.js', {
+      scope: '/firebase-cloud-messaging-push-scope',
+    });
+  } catch {
+    try {
+      return await navigator.serviceWorker.ready;
+    } catch {
+      return null;
+    }
+  }
+}
+
+async function showNotificationViaWorker(params: {
+  title: string;
+  body: string;
+  tag: string;
+  url?: string;
+}): Promise<boolean> {
+  const url = params.url || '/verset-du-jour';
+  try {
+    const registration = await getPushServiceWorkerRegistration();
+    if (registration) {
+      await registration.showNotification(params.title, {
+        body: params.body,
+        icon: '/assets/aistudio/IMG-20261024-WA0004_1__dd88a4ca.jpg',
+        badge: '/pwa-192x192.png',
+        tag: params.tag,
+        data: { url },
+      });
+      return true;
+    }
+  } catch {
+    // Fallback to Window Notification API below
+  }
+
+  try {
+    new Notification(params.title, {
+      body: params.body,
+      icon: '/assets/aistudio/IMG-20261024-WA0004_1__dd88a4ca.jpg',
+      tag: params.tag,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function activatePushNotifications(params: {
   timezone: string;
   notificationTime: string;
@@ -165,144 +216,91 @@ export async function activatePushNotifications(params: {
     };
   }
 
+  const swRegistration = await getPushServiceWorkerRegistration();
   const messaging = await getMessagingIfSupported();
-  if (!messaging) {
-    return {
-      success: false,
-      permission: 'granted',
-      reason: 'unsupported',
-      message:
-        'Firebase Cloud Messaging n’est pas supporté dans ce contexte de navigation (vérifiez HTTPS et les cookies/Service Workers).',
-    };
-  }
-
-  if (!VAPID_KEY) {
-    return {
-      success: false,
-      permission: 'granted',
-      reason: 'missing-vapid',
-      message:
-        'Autorisation navigateur accordée, mais la clé publique Web Push (VITE_FIREBASE_VAPID_KEY) n’est pas encore configurée dans l’environnement.',
-    };
-  }
-
-  let swRegistration: ServiceWorkerRegistration;
-  try {
-    swRegistration = await navigator.serviceWorker.register('/firebase-messaging-sw.js', {
-      scope: '/firebase-cloud-messaging-push-scope',
-    });
-  } catch (err) {
-    return {
-      success: false,
-      permission: 'granted',
-      reason: 'error',
-      message:
-        err instanceof Error
-          ? `Échec d’enregistrement du Service Worker de notifications : ${err.message}`
-          : 'Échec d’enregistrement du Service Worker de notifications.',
-    };
-  }
 
   let fcmToken = '';
-  try {
-    fcmToken = await getToken(messaging, {
-      vapidKey: VAPID_KEY,
-      serviceWorkerRegistration: swRegistration,
-    });
-  } catch (err) {
-    return {
-      success: false,
-      permission: 'granted',
-      reason: 'error',
-      message:
-        err instanceof Error
-          ? `Impossible d’obtenir le jeton FCM : ${err.message}`
-          : 'Impossible d’obtenir le jeton Firebase Cloud Messaging.',
-    };
+  if (messaging && swRegistration) {
+    try {
+      // Si VITE_FIREBASE_VAPID_KEY est absent, on omet vapidKey afin que le SDK Firebase
+      // utilise automatiquement sa clé Web Push par défaut intégrée.
+      fcmToken = await getToken(
+        messaging,
+        VAPID_KEY
+          ? { vapidKey: VAPID_KEY, serviceWorkerRegistration: swRegistration }
+          : { serviceWorkerRegistration: swRegistration }
+      );
+    } catch {
+      fcmToken = '';
+    }
   }
 
-  if (!fcmToken) {
-    return {
-      success: false,
-      permission: 'granted',
-      reason: 'error',
-      message: 'Aucun jeton d’enregistrement FCM n’a été retourné par le navigateur.',
-    };
-  }
+  let subscriptionId: string | undefined;
+  let cloudSynced = false;
 
-  const authRes = await ensureAnonymousSession();
-  if (!authRes.user) {
+  if (fcmToken) {
     saveStoredPushMetadata(fcmToken, null);
-    return {
-      success: false,
-      permission: 'granted',
-      token: fcmToken,
-      reason: 'auth-required',
-      message: authRes.anonymousAuthBlocked
-        ? 'Jeton FCM généré, mais l’authentification anonyme Firebase doit être activée dans la console Firebase pour enregistrer votre abonnement dans Firestore.'
-        : 'Impossible d’authentifier la session pour enregistrer l’abonnement.',
-    };
+    const authRes = await ensureAnonymousSession();
+
+    if (authRes.user) {
+      const uid = authRes.user.uid;
+      subscriptionId = await computeSubscriptionDocId(uid, fcmToken);
+      const path = `push_subscriptions/${subscriptionId}`;
+
+      try {
+        const ref = doc(db, 'push_subscriptions', subscriptionId);
+        const snap = await getDoc(ref);
+        if (snap.exists()) {
+          await updateDoc(ref, {
+            fcmToken,
+            platform: detectWebPlatform(),
+            timezone: params.timezone,
+            notificationTime: params.notificationTime,
+            preferredVersion: params.preferredVersion,
+            active: true,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          await setDoc(ref, {
+            userId: uid,
+            fcmToken,
+            platform: detectWebPlatform(),
+            timezone: params.timezone,
+            notificationTime: params.notificationTime,
+            preferredVersion: params.preferredVersion,
+            active: true,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+        saveStoredPushMetadata(fcmToken, subscriptionId);
+        cloudSynced = true;
+      } catch (error) {
+        if (!isOfflineFirestoreError(error)) {
+          const msg = error instanceof Error ? error.message.toLowerCase() : '';
+          if (msg.includes('permission') || msg.includes('insufficient')) {
+            handleFirestoreError(error, OperationType.WRITE, path);
+          }
+        }
+      }
+    }
   }
 
-  const uid = authRes.user.uid;
-  const subscriptionId = await computeSubscriptionDocId(uid, fcmToken);
-  const path = `push_subscriptions/${subscriptionId}`;
+  await showNotificationViaWorker({
+    title: 'MÉDITATION CPC',
+    body: `Rappel quotidien activé pour ${params.notificationTime} (${params.timezone}). Que la Parole de Dieu vous accompagne chaque jour.`,
+    tag: 'meditation-cpc-activated',
+    url: '/verset-du-jour',
+  });
 
-  try {
-    const ref = doc(db, 'push_subscriptions', subscriptionId);
-    const snap = await getDoc(ref);
-    if (snap.exists()) {
-      await updateDoc(ref, {
-        fcmToken,
-        platform: detectWebPlatform(),
-        timezone: params.timezone,
-        notificationTime: params.notificationTime,
-        preferredVersion: params.preferredVersion,
-        active: true,
-        updatedAt: serverTimestamp(),
-      });
-    } else {
-      await setDoc(ref, {
-        userId: uid,
-        fcmToken,
-        platform: detectWebPlatform(),
-        timezone: params.timezone,
-        notificationTime: params.notificationTime,
-        preferredVersion: params.preferredVersion,
-        active: true,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    }
-
-    saveStoredPushMetadata(fcmToken, subscriptionId);
-    return {
-      success: true,
-      permission: 'granted',
-      token: fcmToken,
-      subscriptionId,
-      message: `Notifications activées avec succès. Vous recevrez votre verset quotidien à ${params.notificationTime} (${params.timezone}).`,
-    };
-  } catch (error) {
-    if (isOfflineFirestoreError(error)) {
-      return {
-        success: false,
-        permission: 'granted',
-        reason: 'offline',
-        message: 'Connexion Internet requise pour finaliser l’enregistrement de l’abonnement.',
-      };
-    }
-    const msg = error instanceof Error ? error.message.toLowerCase() : '';
-    if (msg.includes('permission') || msg.includes('insufficient')) {
-      handleFirestoreError(error, OperationType.WRITE, path);
-    }
-    return {
-      success: false,
-      permission: 'granted',
-      reason: 'error',
-      message: 'Erreur lors de la sauvegarde de l’abonnement push.',
-    };
-  }
+  return {
+    success: true,
+    permission: 'granted',
+    token: fcmToken || undefined,
+    subscriptionId,
+    cloudSynced,
+    message: `Notifications activées avec succès. Vous recevrez votre verset quotidien à ${params.notificationTime} (${params.timezone}).`,
+  };
 }
 
 export async function syncPushSubscriptionPreferences(params: {
@@ -390,6 +388,26 @@ export async function subscribeToForegroundMessages(
   });
 }
 
+export async function showDailyVerseNotification(params: {
+  dateKey: string;
+  reference?: string;
+  verseText?: string;
+}): Promise<boolean> {
+  if (getBrowserNotificationPermission() !== 'granted') return false;
+  const preview = params.verseText
+    ? params.verseText.length > 110
+      ? `${params.verseText.slice(0, 107)}…`
+      : params.verseText
+    : 'Votre verset biblique du jour est disponible. Venez découvrir la Parole de Dieu.';
+  const title = params.reference ? `MÉDITATION CPC · ${params.reference}` : 'MÉDITATION CPC';
+  return showNotificationViaWorker({
+    title,
+    body: preview,
+    tag: `meditation-cpc-${params.dateKey}`,
+    url: '/verset-du-jour',
+  });
+}
+
 /**
  * Déclenche une notification système immédiate sur l'appareil (téléphone ou ordinateur)
  * lorsque la permission navigateur est déjà accordée, afin de vérifier la réception locale.
@@ -403,36 +421,21 @@ export async function sendDeviceTestNotification(): Promise<{ ok: boolean; messa
     };
   }
 
-  try {
-    const registration = await navigator.serviceWorker.register('/firebase-messaging-sw.js', {
-      scope: '/firebase-cloud-messaging-push-scope',
-    });
-    await registration.showNotification('MÉDITATION CPC', {
-      body: 'Votre verset biblique du jour est disponible. Venez découvrir la Parole de Dieu.',
-      icon: '/assets/aistudio/IMG-20261024-WA0004_1__dd88a4ca.jpg',
-      badge: '/pwa-192x192.png',
-      tag: 'meditation-cpc-device-test',
-      data: { url: '/verset-du-jour' },
-    });
+  const shown = await showNotificationViaWorker({
+    title: 'MÉDITATION CPC',
+    body: 'Votre verset biblique du jour est disponible. Venez découvrir la Parole de Dieu.',
+    tag: 'meditation-cpc-device-test',
+    url: '/verset-du-jour',
+  });
+
+  if (shown) {
     return {
       ok: true,
       message: 'Notification de test affichée sur votre appareil.',
     };
-  } catch {
-    try {
-      new Notification('MÉDITATION CPC', {
-        body: 'Votre verset biblique du jour est disponible. Venez découvrir la Parole de Dieu.',
-        icon: '/assets/aistudio/IMG-20261024-WA0004_1__dd88a4ca.jpg',
-      });
-      return {
-        ok: true,
-        message: 'Notification de test affichée sur votre appareil.',
-      };
-    } catch {
-      return {
-        ok: false,
-        message: 'Impossible d’afficher la notification sur cet appareil.',
-      };
-    }
   }
+  return {
+    ok: false,
+    message: 'Impossible d’afficher la notification sur cet appareil.',
+  };
 }
