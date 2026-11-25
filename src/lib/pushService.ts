@@ -18,6 +18,7 @@ export interface PushActivationResult {
   token?: string;
   subscriptionId?: string;
   cloudSynced?: boolean;
+  webPushActive?: boolean;
   reason?:
     | 'permission-denied'
     | 'permission-dismissed'
@@ -92,6 +93,156 @@ function detectWebPlatform(): string {
   return 'web-desktop';
 }
 
+function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const buffer = new ArrayBuffer(rawData.length);
+  const outputArray = new Uint8Array(buffer);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
+function arrayBuffersEqual(a: ArrayBuffer | null, b: Uint8Array<ArrayBuffer>): boolean {
+  if (!a) return false;
+  const viewA = new Uint8Array(a);
+  if (viewA.length !== b.length) return false;
+  for (let i = 0; i < viewA.length; i += 1) {
+    if (viewA[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+async function waitForWorkerActive(registration: ServiceWorkerRegistration): Promise<void> {
+  if (registration.active) return;
+  const worker = registration.installing || registration.waiting;
+  if (!worker) return;
+  await new Promise<void>((resolve) => {
+    const timer = window.setTimeout(resolve, 4000);
+    worker.addEventListener('statechange', () => {
+      if (worker.state === 'activated') {
+        window.clearTimeout(timer);
+        resolve();
+      }
+    });
+  });
+}
+
+async function getMainServiceWorkerRegistration(): Promise<ServiceWorkerRegistration | null> {
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
+    return null;
+  }
+  try {
+    let reg = await navigator.serviceWorker.getRegistration('/');
+    if (!reg) {
+      reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    }
+    await waitForWorkerActive(reg);
+    return reg;
+  } catch {
+    try {
+      return await Promise.race([
+        navigator.serviceWorker.ready,
+        new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 3000)),
+      ]);
+    } catch {
+      return null;
+    }
+  }
+}
+
+async function getFcmServiceWorkerRegistration(): Promise<ServiceWorkerRegistration | null> {
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
+    return null;
+  }
+  try {
+    return await navigator.serviceWorker.register('/firebase-messaging-sw.js', {
+      scope: '/firebase-cloud-messaging-push-scope',
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function fetchServerVapidPublicKey(): Promise<string | null> {
+  try {
+    const res = await fetch('/api/push/vapid-public-key', { cache: 'no-store' });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { publicKey?: string };
+    return typeof data.publicKey === 'string' && data.publicKey.length > 20 ? data.publicKey : null;
+  } catch {
+    return null;
+  }
+}
+
+async function subscribeBrowserWebPush(params: {
+  timezone: string;
+  notificationTime: string;
+  preferredVersion: BibleVersionId;
+}): Promise<{ active: boolean; subscription?: PushSubscription; endpoint?: string }> {
+  if (typeof window === 'undefined' || !('PushManager' in window)) {
+    return { active: false };
+  }
+
+  const registration = await getMainServiceWorkerRegistration();
+  if (!registration || !registration.pushManager) {
+    return { active: false };
+  }
+
+  const publicKey = await fetchServerVapidPublicKey();
+  if (!publicKey) {
+    return { active: false };
+  }
+
+  const appServerKey = urlBase64ToUint8Array(publicKey);
+
+  try {
+    let sub = await registration.pushManager.getSubscription();
+    if (sub && !arrayBuffersEqual(sub.options?.applicationServerKey || null, appServerKey)) {
+      await sub.unsubscribe().catch(() => false);
+      sub = null;
+    }
+
+    if (!sub) {
+      sub = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: appServerKey,
+      });
+    }
+
+    const res = await fetch('/api/push/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        subscription: sub.toJSON(),
+        timezone: params.timezone,
+        notificationTime: params.notificationTime,
+        preferredVersion: params.preferredVersion,
+      }),
+    });
+
+    if (!res.ok) {
+      return { active: false };
+    }
+
+    return { active: true, subscription: sub, endpoint: sub.endpoint };
+  } catch {
+    return { active: false };
+  }
+}
+
+export async function ensureWebPushSubscriptionSynced(params: {
+  timezone: string;
+  notificationTime: string;
+  preferredVersion: BibleVersionId;
+}): Promise<boolean> {
+  if (getBrowserNotificationPermission() !== 'granted') return false;
+  const result = await subscribeBrowserWebPush(params);
+  return result.active;
+}
+
 async function computeSubscriptionDocId(userId: string, fcmToken: string): Promise<string> {
   if (typeof crypto !== 'undefined' && crypto.subtle) {
     const encoded = new TextEncoder().encode(fcmToken);
@@ -105,23 +256,6 @@ async function computeSubscriptionDocId(userId: string, fcmToken: string): Promi
   return `${userId}_web`;
 }
 
-async function getPushServiceWorkerRegistration(): Promise<ServiceWorkerRegistration | null> {
-  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
-    return null;
-  }
-  try {
-    return await navigator.serviceWorker.register('/firebase-messaging-sw.js', {
-      scope: '/firebase-cloud-messaging-push-scope',
-    });
-  } catch {
-    try {
-      return await navigator.serviceWorker.ready;
-    } catch {
-      return null;
-    }
-  }
-}
-
 async function showNotificationViaWorker(params: {
   title: string;
   body: string;
@@ -130,7 +264,8 @@ async function showNotificationViaWorker(params: {
 }): Promise<boolean> {
   const url = params.url || '/verset-du-jour';
   try {
-    const registration = await getPushServiceWorkerRegistration();
+    const registration =
+      (await getMainServiceWorkerRegistration()) || (await getFcmServiceWorkerRegistration());
     if (registration) {
       await registration.showNotification(params.title, {
         body: params.body,
@@ -216,19 +351,20 @@ export async function activatePushNotifications(params: {
     };
   }
 
-  const swRegistration = await getPushServiceWorkerRegistration();
-  const messaging = await getMessagingIfSupported();
+  // 1. Abonnement Web Push W3C principal (permet l'envoi serveur même application fermée)
+  const webPush = await subscribeBrowserWebPush(params);
 
+  // 2. Synchronisation Firebase Cloud Messaging / Firestore (complémentaire, non bloquante)
+  const fcmSw = await getFcmServiceWorkerRegistration();
+  const messaging = await getMessagingIfSupported();
   let fcmToken = '';
-  if (messaging && swRegistration) {
+  if (messaging && fcmSw) {
     try {
-      // Si VITE_FIREBASE_VAPID_KEY est absent, on omet vapidKey afin que le SDK Firebase
-      // utilise automatiquement sa clé Web Push par défaut intégrée.
       fcmToken = await getToken(
         messaging,
         VAPID_KEY
-          ? { vapidKey: VAPID_KEY, serviceWorkerRegistration: swRegistration }
-          : { serviceWorkerRegistration: swRegistration }
+          ? { vapidKey: VAPID_KEY, serviceWorkerRegistration: fcmSw }
+          : { serviceWorkerRegistration: fcmSw }
       );
     } catch {
       fcmToken = '';
@@ -236,7 +372,7 @@ export async function activatePushNotifications(params: {
   }
 
   let subscriptionId: string | undefined;
-  let cloudSynced = false;
+  let cloudSynced = webPush.active;
 
   if (fcmToken) {
     saveStoredPushMetadata(fcmToken, null);
@@ -288,7 +424,7 @@ export async function activatePushNotifications(params: {
 
   await showNotificationViaWorker({
     title: 'MÉDITATION CPC',
-    body: `Rappel quotidien activé pour ${params.notificationTime} (${params.timezone}). Que la Parole de Dieu vous accompagne chaque jour.`,
+    body: `Rappel quotidien activé pour ${params.notificationTime} (${params.timezone}). Vous recevrez votre verset même lorsque l’application est fermée.`,
     tag: 'meditation-cpc-activated',
     url: '/verset-du-jour',
   });
@@ -299,7 +435,10 @@ export async function activatePushNotifications(params: {
     token: fcmToken || undefined,
     subscriptionId,
     cloudSynced,
-    message: `Notifications activées avec succès. Vous recevrez votre verset quotidien à ${params.notificationTime} (${params.timezone}).`,
+    webPushActive: webPush.active,
+    message: webPush.active
+      ? `Notifications activées avec succès. Vous recevrez votre verset chaque jour à ${params.notificationTime} (${params.timezone}), même lorsque l’application est fermée.`
+      : `Notifications activées sur cet appareil pour ${params.notificationTime} (${params.timezone}).`,
   };
 }
 
@@ -309,6 +448,33 @@ export async function syncPushSubscriptionPreferences(params: {
   notificationTime: string;
   preferredVersion: BibleVersionId;
 }): Promise<void> {
+  // Synchronisation serveur Web Push
+  try {
+    const registration = await getMainServiceWorkerRegistration();
+    const sub = await registration?.pushManager?.getSubscription();
+    if (sub) {
+      const res = await fetch('/api/push/preferences', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          endpoint: sub.endpoint,
+          active: params.active,
+          timezone: params.timezone,
+          notificationTime: params.notificationTime,
+          preferredVersion: params.preferredVersion,
+        }),
+      });
+      if (res.status === 404 && params.active) {
+        await subscribeBrowserWebPush(params);
+      }
+    } else if (params.active && getBrowserNotificationPermission() === 'granted') {
+      await subscribeBrowserWebPush(params);
+    }
+  } catch {
+    // Ignore transient network errors during preference sync
+  }
+
+  // Synchronisation Firestore optionnelle
   const { subscriptionId } = loadStoredPushMetadata();
   const uid = auth.currentUser?.uid;
   if (!subscriptionId || !uid) return;
@@ -335,6 +501,21 @@ export async function syncPushSubscriptionPreferences(params: {
 }
 
 export async function deactivatePushNotifications(): Promise<void> {
+  try {
+    const registration = await getMainServiceWorkerRegistration();
+    const sub = await registration?.pushManager?.getSubscription();
+    if (sub) {
+      await fetch('/api/push/unsubscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ endpoint: sub.endpoint }),
+      }).catch(() => undefined);
+      await sub.unsubscribe().catch(() => false);
+    }
+  } catch {
+    // Ignore unsubscribe errors
+  }
+
   const { subscriptionId } = loadStoredPushMetadata();
   const uid = auth.currentUser?.uid;
 
@@ -409,16 +590,49 @@ export async function showDailyVerseNotification(params: {
 }
 
 /**
- * Déclenche une notification système immédiate sur l'appareil (téléphone ou ordinateur)
- * lorsque la permission navigateur est déjà accordée, afin de vérifier la réception locale.
+ * Envoie une vraie notification Web Push depuis le serveur vers cet appareil
+ * (reçue même si l'application est en arrière-plan ou fermée), avec repli local hors ligne.
  */
-export async function sendDeviceTestNotification(): Promise<{ ok: boolean; message: string }> {
+export async function sendDeviceTestNotification(params?: {
+  timezone?: string;
+  notificationTime?: string;
+  preferredVersion?: BibleVersionId;
+}): Promise<{ ok: boolean; message: string }> {
   const permission = getBrowserNotificationPermission();
   if (permission !== 'granted') {
     return {
       ok: false,
       message: 'Autorisez d’abord les notifications sur cet appareil avant d’effectuer un test.',
     };
+  }
+
+  const syncParams = {
+    timezone: params?.timezone || 'Africa/Abidjan',
+    notificationTime: params?.notificationTime || '07:00',
+    preferredVersion: params?.preferredVersion || 'lsg1910',
+  };
+
+  try {
+    const subResult = await subscribeBrowserWebPush(syncParams);
+    if (subResult.active && subResult.subscription) {
+      const res = await fetch('/api/push/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subscription: subResult.subscription.toJSON(),
+          timezone: syncParams.timezone,
+          preferredVersion: syncParams.preferredVersion,
+        }),
+      });
+      if (res.ok) {
+        return {
+          ok: true,
+          message: 'Notification Web Push envoyée depuis le serveur vers votre appareil.',
+        };
+      }
+    }
+  } catch {
+    // Fall back to direct worker notification below
   }
 
   const shown = await showNotificationViaWorker({

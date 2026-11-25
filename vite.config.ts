@@ -17,6 +17,7 @@ export default defineConfig(() => {
           'pwa-192x192.png',
           'pwa-512x512.png',
           'pwa-maskable-512x512.png',
+          'push-sw.js',
           'robots.txt',
           'sitemap.xml',
           'assets/aistudio/IMG-20261024-WA0004_1__dd88a4ca.jpg',
@@ -55,8 +56,9 @@ export default defineConfig(() => {
         },
         workbox: {
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+          importScripts: ['/push-sw.js'],
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2,jpg}'],
-          navigateFallbackDenylist: [/^\/firebase-messaging-sw\.js$/],
+          navigateFallbackDenylist: [/^\/firebase-messaging-sw\.js$/, /^\/api\//],
           runtimeCaching: [
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
@@ -90,7 +92,7 @@ export default defineConfig(() => {
         },
         devOptions: {
           enabled: true,
-          type: 'module',
+          type: 'classic',
         },
       }),
       // Copies src/assets into dist/ so root-relative URLs like

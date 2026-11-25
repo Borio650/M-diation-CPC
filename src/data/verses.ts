@@ -1,4 +1,4 @@
-import { DailyVerse } from '@/src/types/bible';
+import type { DailyVerse } from '../types/bible.ts';
 
 /**
  * Corpus canonique vérifié de 31 passages bibliques authentiques.

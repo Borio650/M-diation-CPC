@@ -4,6 +4,7 @@ import { auth } from '@/src/lib/firebase';
 import {
   activatePushNotifications,
   deactivatePushNotifications,
+  ensureWebPushSubscriptionSynced,
   getBrowserNotificationPermission,
   getMobileNotificationInfo,
   sendDeviceTestNotification,
@@ -244,6 +245,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, []);
 
+  // Synchronise automatiquement l'abonnement Web Push serveur si l'utilisateur a activé les rappels
+  useEffect(() => {
+    if (!notificationEnabled || permissionState !== 'granted') return;
+    void ensureWebPushSubscriptionSynced({
+      timezone,
+      notificationTime,
+      preferredVersion,
+    }).then((active) => {
+      if (active) setHasFcmSubscription(true);
+    });
+  }, [notificationEnabled, permissionState, timezone, notificationTime, preferredVersion]);
+
   // Automatic midnight refresh in the selected timezone
   useEffect(() => {
     const computedToday = getDateKeyForTimezone(timezone);
@@ -416,7 +429,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           saveLastNotifiedDate(getDateKeyForTimezone(timezone));
         }
         setNotificationEnabled(true);
-        setHasFcmSubscription(Boolean(result.token));
+        setHasFcmSubscription(Boolean(result.token || result.webPushActive));
         await persistUserSettings(
           {
             preferredVersion,
@@ -463,9 +476,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [preferredVersion, notificationTime, timezone, currentUser?.uid, showToast]);
 
   const testDeviceNotification = useCallback(async () => {
-    const res = await sendDeviceTestNotification();
+    const res = await sendDeviceTestNotification({
+      timezone,
+      notificationTime,
+      preferredVersion,
+    });
     showToast(res.message, res.ok ? 'success' : 'warning');
-  }, [showToast]);
+  }, [timezone, notificationTime, preferredVersion, showToast]);
 
   const isVerseFavorite = useCallback(
     (reference: string) => favorites.some((fav) => fav.reference === reference),
