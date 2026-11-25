@@ -36,7 +36,7 @@
 ```text
 ├── public/
 │   ├── firebase-messaging-sw.js   # Service Worker Web Push FCM
-│   ├── icon.svg / pwa-*.png       # Icônes PWA & favicon
+│   ├── pwa-*.png / apple-touch-icon.png  # Icônes PWA & iOS
 │   ├── robots.txt                 # SEO
 │   └── sitemap.xml                # SEO
 ├── src/
