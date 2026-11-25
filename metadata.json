@@ -1,0 +1,6 @@
+{
+  "name": "MÉDITATION CPC",
+  "description": "Plateforme chrétienne de méditation quotidienne : un verset biblique chaque jour pour nourrir sa foi, avec notifications Web Push, traductions multiples et partage WhatsApp.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,161 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Global Helpers
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidDateId(dateId) {
+      return dateId is string && dateId.size() == 10 && dateId.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+
+    function isValidTime(t) {
+      return t is string && t.size() == 5 && t.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$');
+    }
+
+    function isValidVersion(v) {
+      return v is string && v in ['lsg1910', 'pdv', 'fc', 'kjf'];
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.email == 'dalougouboris650@gmail.com' && request.auth.token.email_verified == true)
+      );
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidTranslations(t) {
+      return t is map &&
+        t.keys().hasAll(['lsg1910', 'pdv', 'fc', 'kjf']) &&
+        t.keys().hasOnly(['lsg1910', 'pdv', 'fc', 'kjf']) &&
+        t.lsg1910 is string && t.lsg1910.size() >= 1 && t.lsg1910.size() <= 2000 &&
+        t.pdv is string && t.pdv.size() >= 1 && t.pdv.size() <= 2000 &&
+        t.fc is string && t.fc.size() >= 1 && t.fc.size() <= 2000 &&
+        t.kjf is string && t.kjf.size() >= 1 && t.kjf.size() <= 2000;
+    }
+
+    function isValidDailyVerse(data, verseDate) {
+      return data.keys().hasAll(['date', 'reference', 'book', 'chapter', 'verse', 'translations', 'createdAt']) &&
+        data.keys().hasOnly(['date', 'reference', 'book', 'chapter', 'verse', 'translations', 'createdAt']) &&
+        data.date is string && data.date == verseDate && isValidDateId(data.date) &&
+        data.reference is string && data.reference.size() >= 2 && data.reference.size() <= 100 &&
+        data.book is string && data.book.size() >= 2 && data.book.size() <= 60 &&
+        data.chapter is int && data.chapter >= 1 && data.chapter <= 150 &&
+        data.verse is string && data.verse.size() >= 1 && data.verse.size() <= 20 &&
+        isValidTranslations(data.translations) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidUserSettings(data, userId) {
+      return data.keys().hasAll(['userId', 'preferredVersion', 'notificationEnabled', 'notificationTime', 'timezone', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['userId', 'preferredVersion', 'notificationEnabled', 'notificationTime', 'timezone', 'createdAt', 'updatedAt']) &&
+        data.userId is string && data.userId == userId && isValidId(data.userId) &&
+        isValidVersion(data.preferredVersion) &&
+        data.notificationEnabled is bool &&
+        isValidTime(data.notificationTime) &&
+        data.timezone is string && data.timezone.size() >= 2 && data.timezone.size() <= 64 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPushSubscription(data) {
+      return data.keys().hasAll(['userId', 'fcmToken', 'platform', 'timezone', 'notificationTime', 'preferredVersion', 'active', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['userId', 'fcmToken', 'platform', 'timezone', 'notificationTime', 'preferredVersion', 'active', 'createdAt', 'updatedAt']) &&
+        data.userId is string && isValidId(data.userId) &&
+        data.fcmToken is string && data.fcmToken.size() >= 10 && data.fcmToken.size() <= 512 &&
+        data.platform is string && data.platform.size() >= 2 && data.platform.size() <= 64 &&
+        data.timezone is string && data.timezone.size() >= 2 && data.timezone.size() <= 64 &&
+        isValidTime(data.notificationTime) &&
+        isValidVersion(data.preferredVersion) &&
+        data.active is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // 4. Collection Rules
+    match /daily_verses/{verseDate} {
+      allow get: if isValidDateId(verseDate);
+      allow list: if isValidDateId(resource.data.date);
+      allow create: if isAdmin() &&
+        isValidDateId(verseDate) &&
+        isValidDailyVerse(incoming(), verseDate) &&
+        incoming().createdAt == request.time;
+      allow update: if isAdmin() &&
+        isValidDateId(verseDate) &&
+        isValidDailyVerse(incoming(), verseDate) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['reference', 'book', 'chapter', 'verse', 'translations']);
+      allow delete: if isAdmin() && isValidDateId(verseDate);
+    }
+
+    match /users_settings/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() &&
+        isValidId(userId) &&
+        request.auth.uid == userId &&
+        isValidUserSettings(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isSignedIn() &&
+        isValidId(userId) &&
+        (request.auth.uid == userId || isAdmin()) &&
+        isValidUserSettings(incoming(), userId) &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['preferredVersion', 'notificationEnabled', 'notificationTime', 'timezone', 'updatedAt']);
+      allow delete: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+    }
+
+    match /push_subscriptions/{subscriptionId} {
+      allow get: if isSignedIn() && isValidId(subscriptionId) && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() &&
+        isValidId(subscriptionId) &&
+        isValidPushSubscription(incoming()) &&
+        incoming().userId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isSignedIn() &&
+        isValidId(subscriptionId) &&
+        (existing().userId == request.auth.uid || isAdmin()) &&
+        isValidPushSubscription(incoming()) &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['fcmToken', 'platform', 'timezone', 'notificationTime', 'preferredVersion', 'active', 'updatedAt']);
+      allow delete: if isSignedIn() && isValidId(subscriptionId) && (existing().userId == request.auth.uid || isAdmin());
+    }
+
+    match /notification_logs/{logId} {
+      allow get: if isSignedIn() && isValidId(logId) && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create, update, delete: if false;
+    }
+
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && (request.auth.uid == adminId || isAdmin());
+      allow list, create, update, delete: if false;
+    }
+  }
+}

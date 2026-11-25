@@ -1,0 +1,212 @@
+{
+  "entities": {
+    "DailyVerse": {
+      "title": "DailyVerse",
+      "description": "Verset biblique quotidien programmé par date (YYYY-MM-DD) avec ses quatre traductions officielles.",
+      "type": "object",
+      "properties": {
+        "date": {
+          "type": "string",
+          "description": "Date du verset au format YYYY-MM-DD",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "minLength": 10,
+          "maxLength": 10
+        },
+        "reference": {
+          "type": "string",
+          "description": "Référence biblique complète (ex: Jean 3:16)",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "book": {
+          "type": "string",
+          "description": "Nom du livre biblique en français",
+          "minLength": 2,
+          "maxLength": 60
+        },
+        "chapter": {
+          "type": "integer",
+          "description": "Numéro du chapitre"
+        },
+        "verse": {
+          "type": "string",
+          "description": "Numéro(s) du ou des versets (ex: 16 ou 5-6)",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "translations": {
+          "type": "object",
+          "description": "Textes du verset dans les quatre traductions supportées (lsg1910, pdv, fc, kjf)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Horodatage serveur de création"
+        }
+      },
+      "required": ["date", "reference", "book", "chapter", "verse", "translations", "createdAt"]
+    },
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "Préférences personnelles d'un visiteur authentifié (traduction préférée, heure et fuseau horaire des notifications).",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Identifiant Firebase Auth de l'utilisateur",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "preferredVersion": {
+          "type": "string",
+          "enum": ["lsg1910", "pdv", "fc", "kjf"],
+          "description": "Identifiant de la traduction biblique préférée",
+          "maxLength": 20
+        },
+        "notificationEnabled": {
+          "type": "boolean",
+          "description": "Activation des rappels quotidiens par notification Web Push"
+        },
+        "notificationTime": {
+          "type": "string",
+          "description": "Heure quotidienne souhaitée au format HH:MM",
+          "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+          "minLength": 5,
+          "maxLength": 5
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Fuseau horaire IANA (ex: Africa/Abidjan)",
+          "minLength": 2,
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Horodatage serveur de création"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Horodatage serveur de dernière mise à jour"
+        }
+      },
+      "required": ["userId", "preferredVersion", "notificationEnabled", "notificationTime", "timezone", "createdAt", "updatedAt"]
+    },
+    "PushSubscription": {
+      "title": "PushSubscription",
+      "description": "Abonnement Firebase Cloud Messaging d'un navigateur pour l'envoi de rappels quotidiens.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Identifiant Firebase Auth du propriétaire de l'abonnement",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "fcmToken": {
+          "type": "string",
+          "description": "Jeton d'enregistrement Firebase Cloud Messaging",
+          "minLength": 10,
+          "maxLength": 512
+        },
+        "platform": {
+          "type": "string",
+          "description": "Plateforme navigateur (web-desktop, web-mobile, pwa)",
+          "minLength": 2,
+          "maxLength": 64
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Fuseau horaire IANA de l'abonné",
+          "minLength": 2,
+          "maxLength": 64
+        },
+        "notificationTime": {
+          "type": "string",
+          "description": "Heure de notification au format HH:MM",
+          "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+          "minLength": 5,
+          "maxLength": 5
+        },
+        "preferredVersion": {
+          "type": "string",
+          "enum": ["lsg1910", "pdv", "fc", "kjf"],
+          "description": "Traduction biblique utilisée pour les notifications",
+          "maxLength": 20
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Statut d'activité de l'abonnement"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Horodatage serveur de création"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Horodatage serveur de dernière mise à jour"
+        }
+      },
+      "required": ["userId", "fcmToken", "platform", "timezone", "notificationTime", "preferredVersion", "active", "createdAt", "updatedAt"]
+    },
+    "NotificationLog": {
+      "title": "NotificationLog",
+      "description": "Journal d'envoi quotidien côté serveur empêchant les doublons par appareil et par date.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 128
+        },
+        "tokenId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 128
+        },
+        "date": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "maxLength": 10
+        },
+        "status": {
+          "type": "string",
+          "enum": ["sent", "error", "skipped"],
+          "maxLength": 16
+        },
+        "sentAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "error": {
+          "type": "string",
+          "maxLength": 500
+        }
+      },
+      "required": ["userId", "tokenId", "date", "status", "sentAt"]
+    }
+  },
+  "firestore": {
+    "/daily_verses/{verseDate}": {
+      "schema": { "$ref": "#/entities/DailyVerse" },
+      "description": "Collection des versets bibliques quotidiens indexés par date YYYY-MM-DD (lecture publique, écriture administrateur uniquement)."
+    },
+    "/users_settings/{userId}": {
+      "schema": { "$ref": "#/entities/UserSettings" },
+      "description": "Paramètres personnels de traduction et de rappel par utilisateur."
+    },
+    "/push_subscriptions/{subscriptionId}": {
+      "schema": { "$ref": "#/entities/PushSubscription" },
+      "description": "Jetons FCM et préférences de planification Web Push protégés par propriétaire."
+    },
+    "/notification_logs/{logId}": {
+      "schema": { "$ref": "#/entities/NotificationLog" },
+      "description": "Journaux d'envoi serveur gérés exclusivement par Cloud Functions pour prévenir les doublons."
+    }
+  }
+}
